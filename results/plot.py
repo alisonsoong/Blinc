@@ -56,12 +56,28 @@ def quick_plot_fec(df, target_size, fec_ratio):
     y = [quality, quality, 8]
     plt.plot(x, y, label=f"{fec_ratio*100:.1f}% FEC")
 
-video_filter = "video.str.contains('game')"
-df_grace = read_df("grace/all.csv").query(video_filter)
-print(df_grace["video"].unique())
-df_265 = read_df("h265/all.csv").query(video_filter)
-df_264 = read_df("h264/all.csv").query(video_filter)
-df_pretrain = read_df("pretrained/all.csv").query(video_filter)
+# Optional video filter - set to None to include all videos
+# Examples: "video.str.contains('game')" or "video == 'video-0.mp4'"
+video_filter = None  # Use all videos
+
+df_grace = read_df("grace/all.csv")
+if df_grace is not None:
+    if video_filter is not None:
+        df_grace = df_grace.query(video_filter)
+    print("Grace videos:", df_grace["video"].unique() if df_grace is not None and len(df_grace) > 0 else "No data")
+    
+df_265 = read_df("h265/all.csv")
+if df_265 is not None and video_filter is not None:
+    df_265 = df_265.query(video_filter)
+    
+df_264 = read_df("h264/all.csv")
+if df_264 is not None and video_filter is not None:
+    df_264 = df_264.query(video_filter)
+    
+df_pretrain = read_df("pretrained/all.csv")
+if df_pretrain is not None and video_filter is not None:
+    df_pretrain = df_pretrain.query(video_filter)
+    
 df_error = None #read_df("error_concealment/all.csv").query(video_filter)
 
 ''' QUALITY VS SIZE CURVE '''
@@ -75,27 +91,47 @@ if df_265 is not None:
 if df_264 is not None:
     quick_plot_size(df_264.groupby("model").mean().reset_index(), "264")
 plt.xlim(0, 30000)
+plt.xlabel('Size (bytes)', fontsize=12)
+plt.ylabel('SSIM (dB)', fontsize=12)
+plt.title('Quality vs Size', fontsize=14)
 plt.grid()
 plt.legend()
 fig.savefig("ssim_size.png")
 
 
 ''' QUALITY VS LOSS CURVE '''
-size = float(df_grace.query("nframes == 1 and model_id == 4096").mean()["size"])
-for nframes in [1,3,5]:
-    fig = plt.figure()
-    if df_grace is not None:
-        quick_plot_loss(interpolate_quality(df_grace.query("nframes == @nframes").groupby(["loss", "model_id"]).mean().reset_index(), size), "grace")
-    if df_error is not None:
-        quick_plot_loss(interpolate_quality(df_error.query("nframes == @nframes").groupby(["loss", "model_id"]).mean().reset_index(), size), "error concealment")
-    if df_pretrain is not None:
-        quick_plot_loss(interpolate_quality(df_pretrain.query("nframes == @nframes").groupby(["loss", "model_id"]).mean().reset_index(), size), "pretrained")
-    if df_265 is not None:
-        quick_plot_fec(df_265, size, 0.2)
-        quick_plot_fec(df_265, size, 0.5)
-    if df_264 is not None:
-        quick_plot_fec(df_264, size, 0.2)
-        quick_plot_fec(df_264, size, 0.5)
-    plt.grid()
-    plt.legend()
-    fig.savefig(f"ssim_loss-{nframes}.png")
+if df_grace is not None:
+    try:
+        # Get reference size from model 4096 with nframes=1
+        size_query = df_grace.query("nframes == 1 and model_id == 4096")
+        if len(size_query) > 0:
+            size = float(size_query.mean()["size"])
+            for nframes in [1,3,5]:
+                fig = plt.figure()
+                if df_grace is not None:
+                    grace_data = df_grace.query("nframes == @nframes").groupby(["loss", "model_id"], as_index=False).mean()
+                    quick_plot_loss(interpolate_quality(grace_data, size), "grace")
+                if df_error is not None:
+                    error_data = df_error.query("nframes == @nframes").groupby(["loss", "model_id"], as_index=False).mean()
+                    quick_plot_loss(interpolate_quality(error_data, size), "error concealment")
+                if df_pretrain is not None:
+                    pretrain_data = df_pretrain.query("nframes == @nframes").groupby(["loss", "model_id"], as_index=False).mean()
+                    quick_plot_loss(interpolate_quality(pretrain_data, size), "pretrained")
+                if df_265 is not None:
+                    quick_plot_fec(df_265, size, 0.2)
+                    quick_plot_fec(df_265, size, 0.5)
+                if df_264 is not None:
+                    quick_plot_fec(df_264, size, 0.2)
+                    quick_plot_fec(df_264, size, 0.5)
+                plt.xlabel('Loss Rate', fontsize=12)
+                plt.ylabel('SSIM (dB)', fontsize=12)
+                plt.title(f'Quality vs Loss Rate (nframes={nframes})', fontsize=14)
+                plt.grid()
+                plt.legend()
+                fig.savefig(f"ssim_loss-{nframes}.png")
+        else:
+            print("Skipping loss curve plots: no data found for model_id='4096' with nframes=1")
+    except Exception as e:
+        print(f"Skipping loss curve plots: {e}")
+else:
+    print("Skipping loss curve plots because grace data is not available")
