@@ -32,6 +32,7 @@ from dataclasses import dataclass
 import PIL
 import random
 from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
+import argparse
 
 torch.manual_seed(0)
 random.seed(0)
@@ -59,7 +60,10 @@ def SSIM(Y1_raw, Y1_com):
     #y1 = Y1_raw.permute([1,2,0]).cpu().detach().numpy()
     #y2 = Y1_com.permute([1,2,0]).cpu().detach().numpy()
     #return ssim(y1, y2, multichannel=True)
-    return float(ssim( Y1_raw.float().cuda().unsqueeze(0), Y1_com.float().unsqueeze(0), data_range=1, size_average=False).cpu().detach()) 
+    # Ensure both tensors are on the same device
+    device = Y1_raw.device
+    Y1_com = Y1_com.to(device)
+    return float(ssim( Y1_raw.float().unsqueeze(0), Y1_com.float().unsqueeze(0), data_range=1, size_average=False).detach())
 
 def PSNR_YUV(yuv1, yuv2):
     mse = np.mean((yuv1 - yuv2) ** 2)
@@ -92,7 +96,10 @@ def metric_all_in_one(Y1_raw, Y1_com):
     """
     rgbpsnr = PSNR(Y1_raw, Y1_com)
     # breakpoint()
-    rgbssim = float(ssim( Y1_raw.float().cuda().unsqueeze(0), Y1_com.float().unsqueeze(0), data_range=1, size_average=False).cpu().detach()) 
+    # Ensure both tensors are on the same device
+    device = Y1_raw.device
+    Y1_com = Y1_com.to(device)
+    rgbssim = float(ssim( Y1_raw.float().unsqueeze(0), Y1_com.float().unsqueeze(0), data_range=1, size_average=False).detach()) 
 
     # y1, u1, v1, yuv1 = RGB2YUV(Y1_raw, True)
     # y2, u2, v2, yuv2 = RGB2YUV(Y1_com, True)
@@ -175,6 +182,7 @@ def read_video_into_frames(video_path, frame_size = None, nframes=1000):
         os.system("rm -rf {}".format(tmp_path))
 
     frame_path = create_temp_path()
+    print(f"  Extracting frames from video: {video_path}", flush=True)
     if frame_size is None:
         cmd = f"ffmpeg -i {video_path} {frame_path}/%03d.png 2>/dev/null 1>/dev/null"
         #cmd = f"ffmpeg -i {video_path} {frame_path}/%03d.png"
@@ -182,8 +190,9 @@ def read_video_into_frames(video_path, frame_size = None, nframes=1000):
         width, height = frame_size
         cmd = f"ffmpeg -i {video_path} -s {width}x{height} {frame_path}/%03d.png 2>/dev/null 1>/dev/null"
 
-    print(cmd)
+    print(f"  Running: {cmd}", flush=True)
     os.system(cmd)
+    print(f"  Frame extraction completed", flush=True)
     
     image_names = os.listdir(frame_path)
     frames = []
@@ -253,10 +262,12 @@ get_buf.restype = ctypes.POINTER(ctypes.c_char)
 bpg_decode_bytes.restype = ctypes.POINTER(ctypes.c_char)
 
 def bpg_encode(img):
+    # BPG encoding is CPU-based, so move tensor to CPU if needed
     frame = (torch.clamp(img, min = 0, max = 1) * 255).round().byte()
     _, h, w = frame.shape
     frame2 = frame.permute((1, 2, 0)).flatten()
-    bs = frame2.numpy().tobytes()
+    # Move to CPU before converting to numpy
+    bs = frame2.cpu().numpy().tobytes()
     ubs = (ctypes.c_ubyte * len(bs)).from_buffer(bytearray(bs))
     bpg_encode_bytes(ubs, h, w)
     buflen =  get_buflen()
@@ -265,12 +276,19 @@ def bpg_encode(img):
     free_mem(buf)
     return bpg_stream, h, w, len(bpg_stream)
 
-def bpg_decode(bpg_stream, h, w):
+def bpg_decode(bpg_stream, h, w, device=None):
+    """
+    Decode BPG stream to tensor.
+    If device is None, auto-detects: uses CUDA if available, otherwise CPU.
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
     ub_result = (ctypes.c_ubyte * len(bpg_stream)).from_buffer(bytearray(bpg_stream))
     rgb_decoded = bpg_decode_bytes(ub_result, len(bpg_stream), h, w)
     b = ctypes.string_at(rgb_decoded, h * w * 3)
     bytes = np.frombuffer(b, dtype=np.byte).reshape((h, w, 3))
-    image = torch.tensor(bytes).permute((2, 0, 1)).byte().float().cuda()
+    image = torch.tensor(bytes).permute((2, 0, 1)).byte().float().to(device)
     image = image / 255
     free_mem(rgb_decoded)
     return image
@@ -319,7 +337,7 @@ class EncodedFrame:
         REPEATS=64
         nelem = torch.numel(self.code)
         group_len = int((nelem - 1) // REPEATS + 1)
-        rnd = torch.rand(group_len).cuda()
+        rnd = torch.rand(group_len).to(self.code.device)
         rnd = (rnd > loss_prob).long()
         rnd = rnd.repeat(REPEATS)[:nelem]
         rnd = rnd.reshape(self.code.shape)
@@ -355,7 +373,7 @@ def set_hw_step(h, w):
     return h // m, w // n
 
 class AEModel:
-    def __init__(self, qmap_coder, grace_coder: GraceInterface, only_P=True):
+    def __init__(self, qmap_coder, grace_coder: GraceInterface, only_P=True, use_perfect_iframe=False):
         self.qmap_coder = None 
         self.grace_coder = grace_coder
 
@@ -370,6 +388,9 @@ class AEModel:
         # self.h_step = 384
         self.w_step = 128
         self.h_step = 128
+        
+        # Skip BPG encoding for I-frames (much faster for testing)
+        self.use_perfect_iframe = use_perfect_iframe
 
 
 
@@ -407,7 +428,7 @@ class AEModel:
 
         """
         Input:
-            frame: the PIL image
+            frame: the PIL image or torch tensor
         Output:
             eframe: encoded frame, code is torch.tensor on GPU
             tot_size: the total size of p rame and I patch
@@ -416,17 +437,31 @@ class AEModel:
         """
         #print("steps:", self.h_step , self.w_step )
         self.frame_counter += 1
-        frame = to_tensor(frame)
+        # Convert to tensor if PIL image, otherwise assume it's already a tensor
+        if not isinstance(frame, torch.Tensor):
+            frame = to_tensor(frame)
+        # Get device from grace_coder and move frame to that device
+        device = next(self.grace_coder.gracemodel.model.parameters()).device
+        frame = frame.to(device)
         if isIframe:
-            # torch.cuda.synchronize()
-            # start =time.time()
-            # code, shapex, shapey, size = self.qmap_coder.encode(frame)
-            code, shapex, shapey, size = bpg_encode(frame)
-            # torch.cuda.synchronize()
-            # end =time.time()
-            # print("QMAP TIME SPENT IS: ", (end - start) * 1000)
-            eframe = EncodedFrame(code, shapex, shapey, "I", self.frame_counter)
-            return eframe, size
+            if self.use_perfect_iframe:
+                # Skip BPG encoding - use perfect I-frame for faster testing
+                print(f"            Using perfect I-frame (skipping BPG encoding)...", flush=True)
+                # Just store the frame itself as "code" - no actual encoding
+                eframe = EncodedFrame(frame, frame.shape[2], frame.shape[1], "I", self.frame_counter)
+                return eframe, 0  # Size 0 for perfect iframe
+            else:
+                # torch.cuda.synchronize()
+                # start =time.time()
+                # code, shapex, shapey, size = self.qmap_coder.encode(frame)
+                print(f"            Encoding I-frame (BPG encoding, CPU-based)...", flush=True)
+                code, shapex, shapey, size = bpg_encode(frame)
+                print(f"            I-frame encoding completed", flush=True)
+                # torch.cuda.synchronize()
+                # end =time.time()
+                # print("QMAP TIME SPENT IS: ", (end - start) * 1000)
+                eframe = EncodedFrame(code, shapex, shapey, "I", self.frame_counter)
+                return eframe, size
         else:
             assert self.reference_frame is not None
             # use p_index to compute which part to encode the I-frame
@@ -440,7 +475,9 @@ class AEModel:
 
             # encode P part
             # st = time.perf_counter()
+            print(f"            Encoding P-frame (GPU)...", flush=True)
             eframe = self.grace_coder.encode(frame, self.reference_frame)
+            print(f"            P-frame encoding completed", flush=True)
             # torch.cuda.synchronize()
             # ed = time.perf_counter()
             # print("self.grace_coder.encode: ", (ed - st) * 1000)
@@ -470,13 +507,18 @@ class AEModel:
         Input:
             eframe: the encoded frame (EncodedFrame object)
         Output:
-            frame: the decoded frame in torch.tensor (3,h,w) on GPU, which can be used as ref frame
+            frame: the decoded frame in torch.tensor (3,h,w) on the same device as reference frame
         Note:
             this function will NOT update the reference
         """
         if eframe.frame_type == "I":
+            if self.use_perfect_iframe:
+                # Perfect I-frame - code is already the frame tensor
+                return eframe.code
             # out = self.qmap_coder.decode(eframe.code, eframe.shapex, eframe.shapey)
-            out = bpg_decode(eframe.code, eframe.shapex, eframe.shapey)
+            # Auto-detect device: use CUDA if available, otherwise CPU
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            out = bpg_decode(eframe.code, eframe.shapex, eframe.shapey, device=device)
             return out
         else:
             assert self.reference_frame is not None
@@ -490,7 +532,9 @@ class AEModel:
                 ipart = eframe.ipart
                 # idec = self.qmap_coder.decode(ipart.code, ipart.shapex, ipart.shapey)
                 # st = time.perf_counter()
-                idec = bpg_decode(ipart.code, ipart.shapex, ipart.shapey)
+                # Use the same device as the reference frame
+                device = self.reference_frame.device
+                idec = bpg_decode(ipart.code, ipart.shapex, ipart.shapey, device=device)
                 # torch.cuda.synchronize()
                 # ed = time.perf_counter()
                 # print("self.bpg_decode:", (ed - st) * 1000)
@@ -603,7 +647,7 @@ class AEModel:
 
 
 
-def init_ae_model(qmap_quality=1):
+def init_ae_model(qmap_quality=1, use_perfect_iframe=True):
     qmap_config_template = {
             "N": 192,
             "M": 192,
@@ -615,18 +659,30 @@ def init_ae_model(qmap_quality=1):
     qmap_coder = None #QmapModel(qmap_config_template)
 
     GRACE_MODEL = "models/grace"
+    # Auto-detect device: use CUDA if available, otherwise CPU
+    print(f"PyTorch version: {torch.__version__}", flush=True)
+    print(f"CUDA available: {torch.cuda.is_available()}", flush=True)
+    if torch.cuda.is_available():
+        print(f"CUDA device count: {torch.cuda.device_count()}", flush=True)
+        print(f"CUDA device name: {torch.cuda.get_device_name(0)}", flush=True)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}", flush=True)
+    
+    # Set to True to skip BPG encoding (much faster, but I-frames are perfect/lossless)
+    print(f"Use perfect I-frames (skip BPG): {use_perfect_iframe}", flush=True)
+    
     models = {
-            "64": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/64_freeze.model"}, scale_factor=0.25)),
-            "128": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/128_freeze.model"}, scale_factor=0.5)),
-            "256": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/256_freeze.model"}, scale_factor=0.5)),
-            "512": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/512_freeze.model"}, scale_factor=0.5)),
-            "1024": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/1024_freeze.model"}, scale_factor=0.5)),
-            "2048": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/2048_freeze.model"})),
-            "4096": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/4096_freeze.model"})),
-            "6144": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/6144_freeze.model"})),
-            "8192": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/8192_freeze.model"})),
-            "12288": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/12288_freeze.model"})),
-            "16384": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/16384_freeze.model"})),
+            "64": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/64_freeze.model", "device": device}, scale_factor=0.25), use_perfect_iframe=use_perfect_iframe),
+            "128": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/128_freeze.model", "device": device}, scale_factor=0.5), use_perfect_iframe=use_perfect_iframe),
+            "256": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/256_freeze.model", "device": device}, scale_factor=0.5), use_perfect_iframe=use_perfect_iframe),
+            "512": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/512_freeze.model", "device": device}, scale_factor=0.5), use_perfect_iframe=use_perfect_iframe),
+            "1024": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/1024_freeze.model", "device": device}, scale_factor=0.5), use_perfect_iframe=use_perfect_iframe),
+            "2048": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/2048_freeze.model", "device": device}), use_perfect_iframe=use_perfect_iframe),
+            "4096": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/4096_freeze.model", "device": device}), use_perfect_iframe=use_perfect_iframe),
+            "6144": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/6144_freeze.model", "device": device}), use_perfect_iframe=use_perfect_iframe),
+            "8192": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/8192_freeze.model", "device": device}), use_perfect_iframe=use_perfect_iframe),
+            "12288": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/12288_freeze.model", "device": device}), use_perfect_iframe=use_perfect_iframe),
+            "16384": AEModel(qmap_coder, GraceInterface({"path": f"{GRACE_MODEL}/16384_freeze.model", "device": device}), use_perfect_iframe=use_perfect_iframe),
             }
 
     return models
@@ -696,17 +752,28 @@ def encode_whole_video(frames, ae_model: AEModel):
         codes: list of EncodedFrame
         dec_frames: list of decoded frame in torch.Tensor
     """
-    orig_frames = list(map(to_tensor, frames))
+    print(f"      Encoding {len(frames)} frames...", flush=True)
+    # Get device from model
+    device = next(ae_model.grace_coder.gracemodel.model.parameters()).device
+    print(f"      Using device: {device}", flush=True)
+    # Convert frames to tensors and move to device
+    orig_frames = [to_tensor(f).to(device) for f in frames]
     codes = []
     dec_frames = []
     ref_frame = None
     for idx, frame in enumerate(frames):
+        if idx % 4 == 0:
+            print(f"        Processing frame {idx}/{len(frames)}", flush=True)
+        print(f"          Encoding frame {idx}...", flush=True)
         size, eframe = encode_frame(ae_model, idx == 0, ref_frame, frame)
         eframe.tot_size = size
+        print(f"          Decoding frame {idx}...", flush=True)
         decoded_frame = decode_frame(ae_model, eframe, ref_frame, 0)
         codes.append(eframe)
         dec_frames.append(decoded_frame)
         ref_frame = decoded_frame
+        if idx % 4 == 0:
+            print(f"          Completed frame {idx}", flush=True)
     return orig_frames, codes, dec_frames
 
 
@@ -732,17 +799,46 @@ def decode_with_loss(ae_model: AEModel, frame_id, losses, decoded_frames, eframe
 
 
 
-models = init_ae_model()
+def parse_args():
+    parser = argparse.ArgumentParser(description='Grace video codec testing')
+    parser.add_argument('--perfect-iframe', action='store_true', default=False,
+                        help='Use perfect I-frames (skip BPG encoding for faster testing)')
+    parser.add_argument('--bpg-iframe', dest='perfect_iframe', action='store_false',
+                        help='Use BPG encoding for I-frames (slower but realistic)')
+    parser.add_argument('--index-file', type=str, default='INDEX.txt',
+                        help='Path to index file containing video paths (default: INDEX.txt)')
+    parser.add_argument('--output-dir', type=str, default='results/grace',
+                        help='Output directory for results (default: results/grace)')
+    return parser.parse_args()
+
+if __name__ == "__main__":
+    args = parse_args()
+    
+    print("Initializing models...", flush=True)
+    print(f"Configuration:", flush=True)
+    print(f"  - Index file: {args.index_file}", flush=True)
+    print(f"  - Output directory: {args.output_dir}", flush=True)
+    print(f"  - Perfect I-frames: {args.perfect_iframe}", flush=True)
+    
+    models = init_ae_model(use_perfect_iframe=args.perfect_iframe)
+    print("Models initialized.", flush=True)
+    
+    print("Starting video processing...", flush=True)
+    run_one_file(args.index_file, args.output_dir)
+    print("Video processing completed.", flush=True)
 
 def run_one_model(model_id, input_pil_frames):
     total_frames_count = len(input_pil_frames)
+    print(f"    Processing {total_frames_count} frames with model {model_id}", flush=True)
 
     dfs = [] # size, psnr, ssim, loss, frame_id
 
     df = pd.DataFrame()
     model = models[model_id]
     model.p_index = 0
+    print(f"    Encoding video with model {model_id}...", flush=True)
     orig_frames, codes, dec_frames = encode_whole_video(input_pil_frames, model)
+    print(f"    Encoding completed for model {model_id}", flush=True)
     sizes = [code.tot_size for code in codes]
     psnrs = [PSNR(o, d) for o, d in zip(orig_frames, dec_frames)]
     ssims = [SSIM(o, d) for o, d in zip(orig_frames, dec_frames)]
@@ -784,12 +880,15 @@ def run_one_model(model_id, input_pil_frames):
     return final_df
 
 def run_one_video(video):
+    print(f"  Reading video frames from: {video}", flush=True)
     input_frames = read_video_into_frames(video, nframes=16)
+    print(f"  Loaded {len(input_frames)} frames", flush=True)
     
     dfs = []
     for model_id in models.keys():
-        print("  Running model:", model_id)
+        print(f"  Running model: {model_id}", flush=True)
         df = run_one_model(model_id, input_frames)
+        print(f"  Completed model: {model_id}", flush=True)
         df["model_id"] = model_id
         dfs.append(df)
 
@@ -797,15 +896,17 @@ def run_one_video(video):
     return final_df
 
 def run_one_file(index_file, output_dir):
+    print(f"Reading index file: {index_file}", flush=True)
     os.makedirs(output_dir, exist_ok=True)
     videos = []
     with open(index_file, "r") as fin:
         for line in fin:
             videos.append(line.strip("\n"))
+    print(f"Found {len(videos)} videos to process", flush=True)
 
     video_dfs = []
     for idx, video in enumerate(videos):
-        print(f"\033[33mRunning video: {video}, index: {idx}\033[0m")
+        print(f"\033[33mRunning video: {video}, index: {idx}\033[0m", flush=True)
         video_basename = os.path.basename(video)
         if os.path.exists(f"{output_dir}/{video_basename}.csv"):
             print(f"Skip the finished video: {video}")
@@ -819,5 +920,3 @@ def run_one_file(index_file, output_dir):
     final_df = pd.concat(video_dfs)
     final_df.to_csv(f"{output_dir}/all.csv", index=None)
     return final_df
-
-run_one_file("INDEX.txt", "results/grace")

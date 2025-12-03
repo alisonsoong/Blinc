@@ -26,7 +26,8 @@ class GraceModel:
         self.config = config
         self.model = VideoCompressor()
 
-        load_model(self.model, config["path"])
+        map_location = torch.device(self.device)
+        load_model(self.model, config["path"], map_location=map_location)
         self.model = self.model.to(self.device)
         self.model.eval()
         self.use_half = use_half

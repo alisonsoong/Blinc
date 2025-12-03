@@ -18,6 +18,9 @@
 
 *DS_Store
 
+*.tar
+*.zip
+
 !/error_concealment_interface/libs/
 !/error_concealment_interface/libs/**/
 !/error_concealment_interface/libs/**/*.pth

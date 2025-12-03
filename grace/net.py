@@ -24,18 +24,18 @@ import torchac
 def save_model(model, iter):
     torch.save(model.state_dict(), "./snapshot/iter{}.model".format(iter))
 
-def load_model(model, f):
-    with open(f, 'rb') as f:
-        pretrained_dict = torch.load(f)
+def load_model(model, f, map_location=None):
+    file_path = str(f)
+    with open(f, 'rb') as file_handle:
+        pretrained_dict = torch.load(file_handle, map_location=map_location)
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
-    f = str(f)
-    if f.find('iter') != -1 and f.find('.model') != -1:
-        st = f.find('iter') + 4
-        ed = f.find('.model', st)
-        return int(f[st:ed])
+    if file_path.find('iter') != -1 and file_path.find('.model') != -1:
+        st = file_path.find('iter') + 4
+        ed = file_path.find('.model', st)
+        return int(file_path[st:ed])
     else:
         return 0
 
