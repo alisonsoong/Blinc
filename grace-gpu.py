@@ -797,36 +797,6 @@ def decode_with_loss(ae_model: AEModel, frame_id, losses, decoded_frames, eframe
     return damaged
 
 
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='Grace video codec testing')
-    parser.add_argument('--perfect-iframe', action='store_true', default=False,
-                        help='Use perfect I-frames (skip BPG encoding for faster testing)')
-    parser.add_argument('--bpg-iframe', dest='perfect_iframe', action='store_false',
-                        help='Use BPG encoding for I-frames (slower but realistic)')
-    parser.add_argument('--index-file', type=str, default='INDEX.txt',
-                        help='Path to index file containing video paths (default: INDEX.txt)')
-    parser.add_argument('--output-dir', type=str, default='results/grace',
-                        help='Output directory for results (default: results/grace)')
-    return parser.parse_args()
-
-if __name__ == "__main__":
-    args = parse_args()
-    
-    print("Initializing models...", flush=True)
-    print(f"Configuration:", flush=True)
-    print(f"  - Index file: {args.index_file}", flush=True)
-    print(f"  - Output directory: {args.output_dir}", flush=True)
-    print(f"  - Perfect I-frames: {args.perfect_iframe}", flush=True)
-    
-    models = init_ae_model(use_perfect_iframe=args.perfect_iframe)
-    print("Models initialized.", flush=True)
-    
-    print("Starting video processing...", flush=True)
-    run_one_file(args.index_file, args.output_dir)
-    print("Video processing completed.", flush=True)
-
 def run_one_model(model_id, input_pil_frames):
     total_frames_count = len(input_pil_frames)
     print(f"    Processing {total_frames_count} frames with model {model_id}", flush=True)
@@ -920,3 +890,32 @@ def run_one_file(index_file, output_dir):
     final_df = pd.concat(video_dfs)
     final_df.to_csv(f"{output_dir}/all.csv", index=None)
     return final_df
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Grace video codec testing')
+    parser.add_argument('--perfect-iframe', action='store_true', default=False,
+                        help='Use perfect I-frames (skip BPG encoding for faster testing)')
+    parser.add_argument('--bpg-iframe', dest='perfect_iframe', action='store_false',
+                        help='Use BPG encoding for I-frames (slower but realistic)')
+    parser.add_argument('--index-file', type=str, default='INDEX.txt',
+                        help='Path to index file containing video paths (default: INDEX.txt)')
+    parser.add_argument('--output-dir', type=str, default='results/grace',
+                        help='Output directory for results (default: results/grace)')
+    return parser.parse_args()
+
+if __name__ == "__main__":
+    args = parse_args()
+    
+    print("Initializing models...", flush=True)
+    print(f"Configuration:", flush=True)
+    print(f"  - Index file: {args.index_file}", flush=True)
+    print(f"  - Output directory: {args.output_dir}", flush=True)
+    print(f"  - Perfect I-frames: {args.perfect_iframe}", flush=True)
+    
+    models = init_ae_model(use_perfect_iframe=args.perfect_iframe)
+    print("Models initialized.", flush=True)
+    
+    print("Starting video processing...", flush=True)
+    run_one_file(args.index_file, args.output_dir)
+    print("Video processing completed.", flush=True)
