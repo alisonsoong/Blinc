@@ -98,11 +98,14 @@ class VideoCompressor(nn.Module):
         prediction = self.warpnet(inputfeature) + warpframe
         return prediction, warpframe
 
-    def forward(self, input_image, referframe, quant_noise_feature=None, quant_noise_z=None, quant_noise_mv=None):
+    def forward(self, input_image, referframe, quant_noise_feature=None, quant_noise_z=None, quant_noise_mv=None, block_loss_mask=None):
         estmv = self.opticFlow(input_image, referframe)
         mvfeature = self.mvEncoder(estmv)
         if self.training:
             quant_mv = mvfeature + quant_noise_mv
+            # NEW: Apply block-loss mask to simulate packet losses
+            if block_loss_mask is not None and 'mv' in block_loss_mask:
+                quant_mv = quant_mv * block_loss_mask['mv']
         else:
             quant_mv = torch.round(mvfeature)
             #quant_mv = torch.zeros(quant_mv.size(), device=quant_mv.device)
@@ -118,6 +121,9 @@ class VideoCompressor(nn.Module):
 
         if self.training:
             compressed_z = z + quant_noise_z
+            # NEW: Apply block-loss mask
+            if block_loss_mask is not None and 'z' in block_loss_mask:
+                compressed_z = compressed_z * block_loss_mask['z']
         else:
             compressed_z = torch.round(z)
 
@@ -127,6 +133,9 @@ class VideoCompressor(nn.Module):
 
         if self.training:
             compressed_feature_renorm = feature_renorm + quant_noise_feature
+            # NEW: Apply block-loss mask
+            if block_loss_mask is not None and 'res' in block_loss_mask:
+                compressed_feature_renorm = compressed_feature_renorm * block_loss_mask['res']
         else:
             compressed_feature_renorm = torch.round(feature_renorm)
             #compressed_feature_renorm = torch.zeros(feature_renorm.size(), device=feature_renorm.device)

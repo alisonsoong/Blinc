@@ -24,3 +24,5 @@
 !/error_concealment_interface/libs/
 !/error_concealment_interface/libs/**/
 !/error_concealment_interface/libs/**/*.pth
+
+logs/
