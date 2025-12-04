@@ -124,7 +124,7 @@ def compute_true_bits_from_torchac(code: AECode, entropy_codec: EntropyCodec) ->
 # -----------------------------
 # Virtual packetization
 # -----------------------------
-def build_packets(total_bits: int, packet_bytes: int = 1440):
+def build_packets(total_bits: int, packet_bytes: int = 1400):
     """
     Split a frame's bitstream into packets of up to `packet_bytes` bytes.
     Returns a list of (bit_start, bit_end) for each packet, [start, end).
@@ -346,13 +346,13 @@ def main():
     parser.add_argument(
         "--chunk_bytes",
         type=int,
-        default=32,
+        default=40,
         help="Virtual chunk size in bytes (each chunk ≈ this many bits in the stream)",
     )
     parser.add_argument(
         "--packet_bytes",
         type=int,
-        default=1440,
+        default=1400,
         help="Max packet size in bytes (last packet may be smaller)",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
